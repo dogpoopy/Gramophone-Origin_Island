@@ -31,19 +31,11 @@ android {
 
     signingConfigs {
         create("release") {
-            if (project.hasProperty("AKANE_RELEASE_KEY_ALIAS")) {
-                storeFile = file(project.properties["AKANE_RELEASE_STORE_FILE"].toString())
-                storePassword = project.properties["AKANE_RELEASE_STORE_PASSWORD"].toString()
-                keyAlias = project.properties["AKANE_RELEASE_KEY_ALIAS"].toString()
-                keyPassword = project.properties["AKANE_RELEASE_KEY_PASSWORD"].toString()
-            }
-        }
-        create("release2") {
-            if (project.hasProperty("AKANE2_RELEASE_KEY_ALIAS")) {
-                storeFile = file(project.properties["AKANE2_RELEASE_STORE_FILE"].toString())
-                storePassword = project.properties["AKANE2_RELEASE_STORE_PASSWORD"].toString()
-                keyAlias = project.properties["AKANE2_RELEASE_KEY_ALIAS"].toString()
-                keyPassword = project.properties["AKANE2_RELEASE_KEY_PASSWORD"].toString()
+            if (project.hasProperty("RELEASE_KEY_ALIAS")) {
+                storeFile = file(project.properties["RELEASE_STORE_FILE"].toString())
+                storePassword = project.properties["RELEASE_STORE_PASSWORD"].toString()
+                keyAlias = project.properties["RELEASE_KEY_ALIAS"].toString()
+                keyPassword = project.properties["RELEASE_KEY_PASSWORD"].toString()
             }
         }
     }
@@ -194,7 +186,7 @@ android {
             vcsInfo {
                 include = false
             }
-            if (project.hasProperty("AKANE_RELEASE_KEY_ALIAS") || project.hasProperty("signing2")) {
+            if (project.hasProperty("RELEASE_KEY_ALIAS") || project.hasProperty("signing2")) {
                 signingConfig = signingConfigs[if (project.hasProperty("signing2"))
                     "release2" else "release"]
             }
