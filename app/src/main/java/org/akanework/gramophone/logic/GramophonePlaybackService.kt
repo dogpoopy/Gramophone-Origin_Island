@@ -111,6 +111,8 @@ import org.akanework.gramophone.logic.utils.LastPlayedManager
 import org.akanework.gramophone.logic.utils.LrcUtils.LrcParserOptions
 import org.akanework.gramophone.logic.utils.LrcUtils.extractAndParseLyrics
 import org.akanework.gramophone.logic.utils.LrcUtils.loadAndParseLyricsFile
+import org.akanework.gramophone.logic.utils.ReplayGainAudioProcessor
+import org.akanework.gramophone.logic.utils.ReplayGainUtil
 import org.akanework.gramophone.logic.utils.SemanticLyrics
 import org.akanework.gramophone.logic.utils.exoplayer.EndedWorkaroundPlayer
 import org.akanework.gramophone.logic.utils.exoplayer.GramophoneExtractorsFactory
@@ -118,6 +120,7 @@ import org.akanework.gramophone.logic.utils.exoplayer.GramophoneMediaSourceFacto
 import org.akanework.gramophone.logic.utils.exoplayer.GramophoneRenderFactory
 import org.akanework.gramophone.ui.LyricWidgetProvider
 import org.akanework.gramophone.ui.MainActivity
+import uk.akane.libphonograph.items.albumId
 import kotlin.random.Random
 
 
@@ -126,7 +129,8 @@ import kotlin.random.Random
  * It's using exoplayer2 as its player backend.
  */
 class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Listener,
-    MediaLibraryService.MediaLibrarySession.Callback, Player.Listener, AnalyticsListener {
+    MediaLibraryService.MediaLibrarySession.Callback, Player.Listener, AnalyticsListener,
+    SharedPreferences.OnSharedPreferenceChangeListener {
 
     companion object {
         private const val TAG = "GramoPlaybackService"
@@ -168,6 +172,8 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
     private lateinit var prefs: SharedPreferences
     private var lastSentHighlightedLyric: String? = null
     private lateinit var afFormatTracker: AfFormatTracker
+    private lateinit var rgAp: ReplayGainAudioProcessor
+    private var rgMode = 0 // 0 = disabled, 1 = track, 2 = album, 3 = smart
     private var updatedLyricAtLeastOnce = false
     private val downstreamFormat = hashSetOf<Pair<Any, Pair<Int, Format>>>()
     private val pendingDownstreamFormat = hashSetOf<Pair<Any, Pair<Int, Format>>>()
@@ -340,16 +346,15 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
                 Log.e(TAG, "mediaPeriodId is NULL in formatChangedCallback!!")
             }
         }
+        rgAp = ReplayGainAudioProcessor()
         val player = EndedWorkaroundPlayer(
             ExoPlayer.Builder(
                 this,
                 GramophoneRenderFactory(
-                    this, this::onAudioSinkInputFormatChanged,
+                    this, rgAp, this::onAudioSinkInputFormatChanged,
                     afFormatTracker::setAudioSink
                 )
-                    .setPcmEncodingRestrictionLifted(
-                        prefs.getBooleanStrict("floatoutput", false)
-                    )
+                    .setPcmEncodingRestrictionLifted(true)
                     .setEnableDecoderFallback(true)
                     .setEnableAudioTrackPlaybackParams(true)
                     .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER),
@@ -375,6 +380,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
                                 .apply {
                                     val config = prefs.getStringStrict("offload", "0")?.toIntOrNull()
                                     if (config != null && config > 0 && Flags.OFFLOAD) {
+	                                    rgAp.setOffloadEnabled(true)
                                         setAudioOffloadMode(TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED)
                                         setIsGaplessSupportRequired(config == 2)
                                     }
@@ -384,6 +390,13 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
                 .setPlaybackLooper(internalPlaybackThread.looper)
                 .build()
         )
+	    player.exoPlayer.addListener(object : Player.Listener {
+		    override fun onAudioSessionIdChanged(audioSessionId: Int) {
+			    // https://github.com/androidx/media/issues/2739
+				// TODO(ASAP) wasn't that bug supposed to be fixed?!
+			    this@GramophonePlaybackService.onAudioSessionIdChanged(audioSessionId)
+		    }
+	    })
         player.exoPlayer.addAnalyticsListener(EventLogger())
         player.exoPlayer.addAnalyticsListener(afFormatTracker)
         player.exoPlayer.addAnalyticsListener(this)
@@ -501,6 +514,8 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
         addSession(mediaSession!!)
         controller = MediaBrowser.Builder(this, mediaSession!!.token).buildAsync().get()
         controller!!.addListener(this)
+        prefs.registerOnSharedPreferenceChangeListener(this)
+        onSharedPreferenceChanged(prefs, null) // read initial values
         ContextCompat.registerReceiver(
             this,
             seekReceiver,
@@ -543,6 +558,10 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
                     }
                     if (endedWorkaroundPlayer?.nextShuffleOrder != null)
                         throw IllegalStateException("shuffleFactory was not consumed during restore")
+                    if (mediaSession?.connectedControllers?.find { it.connectionHints
+                        .getBoolean("PrepareWhenReady", false) } != null) {
+                        handler.post { controller?.prepare() }
+                    }
                 }
                 lastPlayedManager.allowSavingState = true
             }
@@ -608,6 +627,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
         instanceForWidgetAndLyricsOnly = null
         unregisterReceiver(seekReceiver)
         unregisterReceiver(btReceiver)
+        prefs.unregisterOnSharedPreferenceChangeListener(this)
         // Important: this must happen before sending stop() as that changes state ENDED -> IDLE
         lastPlayedManager.save()
         scope.cancel()
@@ -660,6 +680,10 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
                 )
             }
         }
+        if (controller.connectionHints.getBoolean("PrepareWhenReady", false) &&
+            this.controller?.currentTimeline?.isEmpty == false) {
+            handler.post { this.controller?.prepare() }
+        }
         availableSessionCommands.add(SessionCommand(SERVICE_SET_TIMER, Bundle.EMPTY))
         availableSessionCommands.add(SessionCommand(SERVICE_GET_SESSION, Bundle.EMPTY))
         availableSessionCommands.add(SessionCommand(SERVICE_QUERY_TIMER, Bundle.EMPTY))
@@ -686,6 +710,49 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
         Log.i(TAG, "onDisconnected(): $controller")
     }
 
+    override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences, key: String?) {
+        if (key == null || key == "rg_mode") {
+            rgMode = prefs.getStringStrict("rg_mode", "0")!!.toInt()
+            computeRgMode()
+        }
+        if (key == null || key == "rg_drc") {
+            val drc = prefs.getBooleanStrict("rg_drc", true)
+            rgAp.setReduceGain(!drc)
+        }
+        if (key == null || key == "rg_rg_gain") {
+            val rgGain = prefs.getIntStrict("rg_rg_gain", 15)
+            rgAp.setRgGain(rgGain - 15)
+        }
+        if (key == null || key == "rg_no_rg_gain" || key == "rg_boost_gain") {
+            val nonRgGain = prefs.getIntStrict("rg_no_rg_gain", 0)
+	        val boostGain = prefs.getIntStrict("rg_boost_gain", 0)
+            rgAp.setNonRgGain(-nonRgGain - boostGain)
+	        rgAp.setBoostGain(boostGain)
+        }
+    }
+
+    private fun computeRgMode() {
+        rgAp.setMode(when (rgMode) {
+            0 -> ReplayGainUtil.Mode.None
+            1 -> ReplayGainUtil.Mode.Track
+            2 -> ReplayGainUtil.Mode.Album
+            3 -> {
+                val item = controller?.currentMediaItem
+                val idx = controller?.currentMediaItemIndex ?: 0
+                val count = controller?.mediaItemCount
+                val next = if (idx + 1 >= (count ?: 0)) null else
+                    controller?.getMediaItemAt(idx + 1)
+                val prev = if (idx - 1 < 0 || (count ?: 0) == 0) null else
+                    controller?.getMediaItemAt(idx - 1)
+                if (item != null && (item.mediaMetadata.albumId == next?.mediaMetadata?.albumId ||
+                    item.mediaMetadata.albumId == prev?.mediaMetadata?.albumId))
+                    ReplayGainUtil.Mode.Album
+                else ReplayGainUtil.Mode.Track
+            }
+            else -> throw IllegalArgumentException("invalid rg mode $rgMode")
+        })
+    }
+
     override fun onAudioSessionIdChanged(audioSessionId: Int) {
         if (audioSessionId != lastSessionId) {
             broadcastAudioSessionClose()
@@ -696,6 +763,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
 
     private fun broadcastAudioSession() {
         if (lastSessionId != 0) {
+			Log.i(TAG, "broadcast audio session open: $lastSessionId")
             sendBroadcast(Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
                 putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
                 putExtra(AudioEffect.EXTRA_AUDIO_SESSION, lastSessionId)
@@ -708,6 +776,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
 
     private fun broadcastAudioSessionClose() {
         if (lastSessionId != 0) {
+	        Log.i(TAG, "broadcast audio session close: $lastSessionId")
             sendBroadcast(Intent(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION).apply {
                 putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
                 putExtra(AudioEffect.EXTRA_AUDIO_SESSION, lastSessionId)
@@ -1085,7 +1154,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
         if (deviceInfo.playbackType == DeviceInfo.PLAYBACK_TYPE_REMOTE) {
             handler.postDelayed({
                 setShowNotificationForEmptyPlayer(SHOW_NOTIFICATION_FOR_EMPTY_PLAYER_NEVER)
-            }, 2000) // TODO lol
+            }, 2000) // TODO(ASAP) lol
         } else {
             setShowNotificationForEmptyPlayer(SHOW_NOTIFICATION_FOR_EMPTY_PLAYER_AFTER_STOP_OR_ERROR)
         }
@@ -1157,6 +1226,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
     override fun onTimelineChanged(timeline: Timeline, reason: @Player.TimelineChangeReason Int) {
         if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) {
             refreshMediaButtonCustomLayout()
+            computeRgMode()
         }
         pendingDownstreamFormat.toSet().forEach {
             if (timeline.getIndexOfPeriod(it.first) == C.INDEX_UNSET) {

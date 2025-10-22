@@ -47,17 +47,19 @@ open class ReflectionAudioEffect(type: UUID, uuid: UUID, priority: Int, audioSes
 		val EFFECT_TYPE_NULL by lazy {
 			AudioEffect::class.java.getDeclaredField("EFFECT_TYPE_NULL").get(null) as UUID
 		}
-		fun isEffectTypeAvailable(type: UUID?): Boolean {
-			val desc = AudioEffect.queryEffects()
-			if (desc == null) {
-				return false
-			}
+		fun isEffectTypeAvailable(type: UUID?, uuid: UUID?): Boolean {
+			val desc = AudioEffect.queryEffects() ?: return false
 			for (i in desc.indices) {
-				if (desc[i]!!.type == type) {
-					return true
+				if (type == null || desc[i]!!.type == type) {
+					if (uuid == null || desc[i]!!.uuid == uuid) {
+						return true
+					}
 				}
 			}
 			return false
+		}
+		fun isEffectTypeOffloadable(type: UUID?, uuid: UUID?): Boolean {
+			TODO("implement this using AudioSystem::queryEffect")
 		}
 	}
 	private val effect: AudioEffect = AudioEffect::class.java
@@ -129,8 +131,7 @@ open class ReflectionAudioEffect(type: UUID, uuid: UUID, priority: Int, audioSes
 	 *         otherwise.
 	 * @throws IllegalStateException
 	 */
-	val hasControl
-		get() = effect.hasControl()
+	fun hasControl() = effect.hasControl()
 
 	/**
 	 * Releases the native AudioEffect resources. It is a good practice to
